@@ -9,3 +9,13 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Internal / private — keep out of the public repo
+DESIGN.md
+*.internal.md
+NOTES.md
+TODO.md
+notes/
+internal/
+.env.*
+!.env.example

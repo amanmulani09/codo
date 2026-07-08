@@ -122,5 +122,5 @@ GitHub App's access list.
 ---
 
 <div align="center">
-<sub>Codo is powered by Claude. Building or self-hosting Codo? See <a href="DESIGN.md">DESIGN.md</a> for the technical documentation.</sub>
+<sub>Codo is powered by Claude.</sub>
 </div>
