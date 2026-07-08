@@ -1,22 +1,25 @@
-"""The review agent: builds the prompt and runs a capped tool-use loop.
+"""The review engine — provider-agnostic via LangChain.
 
-Minimal-agentic by design — a single Claude pass that may pull a few extra
-files for context via the `get_file` tool (hard-capped), then must call
-`submit_review` to return structured findings.
+Uses LangChain's `init_chat_model`, so the inference model is chosen entirely by
+config (`LLM_PROVIDER` / `LLM_MODEL`): swap Groq, Anthropic, or OpenAI with no
+code change. Findings come back as structured output (a validated `ReviewResult`),
+so there's no fragile JSON parsing.
+
+Single-shot by design — the model sees the full diff and returns findings in one
+call. (If you later want the agentic `get_file` step, LangChain's `bind_tools`
+adds it in a provider-agnostic way.)
 """
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+import os
 
-import anthropic
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from .config import Settings
 from .github_client import ChangedFile, should_skip
 from .schemas import Finding, RepoConfig, ReviewResult
-
-# Callable the loop uses to satisfy `get_file` tool calls: (path) -> text | None
-FileFetcher = Callable[[str], Awaitable[str | None]]
 
 SYSTEM_PROMPT = """You are a senior software engineer reviewing a GitHub pull request.
 
@@ -25,57 +28,15 @@ leaks, race conditions, broken error handling, and clear performance traps. \
 Prefer a handful of high-signal findings over exhaustive nitpicking. Do NOT flag \
 pure style or naming unless the repo config asks for nits.
 
-You may call `get_file` (up to a few times) to read a full file when the diff \
-hunk alone is not enough to judge a change — e.g. to see a function you're \
-calling or a caller you might break. Only anchor inline comments to lines that \
-appear in the provided diff.
+Only anchor a finding to a line that appears in the provided diff. If the PR \
+looks clean, return an empty findings list with a one-line summary."""
 
-When done, call `submit_review` exactly once with a short PR-level summary and \
-your findings. If the PR looks clean, submit an empty findings list with a \
-one-line summary."""
-
-TOOLS = [
-    {
-        "name": "get_file",
-        "description": "Read the full current contents of a file in the repo for extra context.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Repo-relative file path"}
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "submit_review",
-        "description": "Submit the final review. Call this exactly once when finished.",
-        "strict": True,
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string", "description": "Short PR-level walkthrough + risks"},
-                "findings": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "file": {"type": "string"},
-                            "line": {"type": "integer"},
-                            "severity": {"type": "string", "enum": ["critical", "warning", "nit"]},
-                            "comment": {"type": "string"},
-                            "suggestion": {"type": "string"},
-                        },
-                        "required": ["file", "line", "severity", "comment"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["summary", "findings"],
-            "additionalProperties": False,
-        },
-    },
-]
+# Maps a provider name to the env var LangChain reads for its API key.
+_PROVIDER_ENV = {
+    "groq": ("GROQ_API_KEY", "groq_api_key"),
+    "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+    "openai": ("OPENAI_API_KEY", "openai_api_key"),
+}
 
 
 def build_user_prompt(
@@ -97,7 +58,20 @@ def build_user_prompt(
 class Reviewer:
     def __init__(self, settings: Settings):
         self._settings = settings
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        provider = settings.llm_provider.lower()
+
+        # Make the chosen provider's key visible to LangChain (it reads env vars).
+        env = _PROVIDER_ENV.get(provider)
+        if env:
+            env_name, attr = env
+            key = getattr(settings, attr, "")
+            if key and not os.environ.get(env_name):
+                os.environ[env_name] = key
+
+        # No temperature override — some models (e.g. Claude Sonnet 5) reject
+        # non-default sampling params. Structured output handles determinism.
+        model = init_chat_model(settings.llm_model, model_provider=provider)
+        self._llm = model.with_structured_output(ReviewResult)
 
     async def review(
         self,
@@ -105,69 +79,20 @@ class Reviewer:
         description: str,
         files: list[ChangedFile],
         config: RepoConfig,
-        fetch_file: FileFetcher,
+        fetch_file=None,  # kept for interface compatibility; unused in single-shot
     ) -> ReviewResult:
-        # Only send reviewable files to the model.
         review_files = [f for f in files if not should_skip(f.path)][: self._settings.max_files]
         if not review_files:
             return ReviewResult(summary="No reviewable code changes in this PR.", findings=[])
 
-        messages: list[dict] = [
-            {"role": "user", "content": build_user_prompt(title, description, review_files, config)}
-        ]
-        tool_calls_used = 0
-
-        for _ in range(self._settings.max_agent_iterations):
-            allow_get_file = tool_calls_used < self._settings.max_tool_calls
-            tools = TOOLS if allow_get_file else [TOOLS[1]]  # drop get_file once capped
-
-            resp = await self._client.messages.create(
-                model=self._settings.review_model,
-                max_tokens=8000,
-                system=SYSTEM_PROMPT,
-                tools=tools,
-                messages=messages,
-            )
-            messages.append({"role": "assistant", "content": resp.content})
-
-            tool_uses = [b for b in resp.content if b.type == "tool_use"]
-            if not tool_uses:
-                # Model stopped without submitting — nudge it once more.
-                messages.append(
-                    {"role": "user", "content": "Please call submit_review now with your findings."}
-                )
-                continue
-
-            submitted = _find_submit(tool_uses)
-            if submitted is not None:
-                return _parse_result(submitted.input)
-
-            # Otherwise satisfy get_file calls and loop.
-            results = []
-            for tu in tool_uses:
-                if tu.name == "get_file":
-                    tool_calls_used += 1
-                    content = await fetch_file(tu.input.get("path", ""))
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tu.id,
-                            "content": (content or "File not found or not readable.")[:20000],
-                        }
-                    )
-            messages.append({"role": "user", "content": results})
-
-        # Ran out of iterations without a submission.
-        return ReviewResult(
-            summary="Review did not complete within the iteration budget.", findings=[]
+        prompt = build_user_prompt(title, description, review_files, config)
+        result = await self._llm.ainvoke(
+            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
         )
-
-
-def _find_submit(tool_uses: list) -> object | None:
-    for tu in tool_uses:
-        if tu.name == "submit_review":
-            return tu
-    return None
+        if isinstance(result, ReviewResult):
+            return result
+        # Some providers return a dict — coerce and drop malformed findings.
+        return _parse_result(result if isinstance(result, dict) else {})
 
 
 def _parse_result(data: dict) -> ReviewResult:

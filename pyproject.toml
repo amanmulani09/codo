@@ -1,16 +1,18 @@
 [project]
 name = "codo"
 version = "0.1.0"
-description = "A CodeRabbit-style AI code review GitHub App powered by Claude"
+description = "A CodeRabbit-style AI code review GitHub App"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
-    "gidgethub>=5.3",
     "httpx>=0.28",
     "pyjwt[crypto]>=2.10",
-    "anthropic>=0.69",
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+    "langchain-groq>=0.2",
+    "langchain-anthropic>=0.3",
     "arq>=0.26",
     "redis>=5.2",
     "pydantic>=2.10",
@@ -20,6 +22,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Extra inference providers (LangChain integrations). Groq + Anthropic ship by default.
+openai = ["langchain-openai>=0.2"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",

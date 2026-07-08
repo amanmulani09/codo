@@ -18,9 +18,15 @@ class Settings(BaseSettings):
     github_private_key: str = ""
     github_private_key_path: str = ""
 
-    # Anthropic
+    # LLM — provider-agnostic via LangChain. Swap models with env vars, no code change.
+    #   groq/llama-3.3-70b-versatile   anthropic/claude-sonnet-5   openai/gpt-4o
+    llm_provider: str = "groq"
+    llm_model: str = "llama-3.3-70b-versatile"
+
+    # API keys — only the one for your chosen provider is needed.
+    groq_api_key: str = ""
     anthropic_api_key: str = ""
-    review_model: str = "claude-sonnet-5"
+    openai_api_key: str = ""
 
     # Infra
     redis_url: str = "redis://localhost:6379"
@@ -32,8 +38,6 @@ class Settings(BaseSettings):
     # Behaviour caps
     max_files: int = 40
     max_diff_bytes: int = 400_000
-    max_tool_calls: int = 3
-    max_agent_iterations: int = 6
 
     @model_validator(mode="after")
     def _load_private_key_from_path(self) -> "Settings":
