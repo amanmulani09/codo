@@ -244,5 +244,39 @@ codo/
     db.py / models.py  # SQLModel tables
   tests/
 ```
+
+---
+
+## 11. Running locally (developers)
+
+Prerequisites: Python 3.12+, [`uv`](https://docs.astral.sh/uv/), and Redis.
+
+```bash
+uv sync --extra dev          # create venv + install deps (incl. test tools)
+cp .env.example .env          # then fill in the values
 ```
+
+**Create the GitHub App:** GitHub → Settings → Developer settings → GitHub Apps →
+New. Permissions: Pull requests (R/W), Contents (R), Checks (R/W). Subscribe to
+the **Pull request** event. Set the webhook URL to `https://<host>/webhook` with
+a secret (mirror it in `.env`), generate a private key (.pem), and note the App
+ID. Install the App on a test repo.
+
+**Run the two processes:**
+
+```bash
+# terminal 1 — webhook receiver
+uv run uvicorn app.main:app --reload --port 8000
+
+# terminal 2 — review worker
+uv run arq app.worker.WorkerSettings
+```
+
+Expose port 8000 with a tunnel (e.g. `ngrok http 8000`) and use that URL as the
+App's webhook URL. Open a PR on the installed repo to trigger a review.
+
+**Tests:**
+
+```bash
+uv run python -m pytest -q
 ```
